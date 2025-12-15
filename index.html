@@ -1,72 +1,39 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mute Counter</title>
-
+<title>Mute Timer</title>
 <style>
-body{
-  margin:0;
-  min-height:100vh;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  background:#0b1220;
-  color:#e5eef8;
-  font-family:system-ui,Segoe UI,Roboto,Arial;
-}
-.card{
-  max-width:420px;
-  width:100%;
-  background:#0f172a;
-  border-radius:14px;
-  padding:24px;
-  text-align:center;
-  box-shadow:0 10px 30px rgba(0,0,0,.5);
-}
-h1{margin:0 0 6px;font-size:1.2rem}
-.person{color:#94a3b8;font-size:.95rem}
-.number{font-size:4.5rem;font-weight:700;margin:12px 0}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#0b1220;color:#e5eef8;font-family:system-ui}
+.card{background:#0f172a;padding:24px;border-radius:14px;width:360px;text-align:center}
+.number{font-size:2.2rem;font-weight:700;margin:10px 0}
 .small{color:#94a3b8;font-size:.85rem}
-.controls{margin-top:14px;display:none;gap:8px}
-.controls input, .controls button{
-  width:100%;
-  padding:10px;
-  border-radius:8px;
-  border:none;
-  font-size:.95rem;
-}
-.controls button{cursor:pointer}
-.show-admin{margin-top:14px;font-size:.85rem;color:#7dd3fc;cursor:pointer}
+button,input{width:100%;margin-top:8px;padding:10px;border-radius:8px;border:none}
+.admin{margin-top:12px;color:#7dd3fc;cursor:pointer;font-size:.85rem}
 </style>
 </head>
 <body>
 
 <div class="card">
-  <h1>Mute counter</h1>
-  <div class="person" id="person">someone</div>
-  <div class="number" id="count">0</div>
-  <div class="small" id="endNote"></div>
+  <h2 id="person">someone</h2>
+  <div class="number" id="time">0d 0h 0m 0s</div>
+  <div class="small" id="end"></div>
 
-  <div class="show-admin" id="adminBtn">admin</div>
+  <div class="admin" onclick="toggle()">admin</div>
 
-  <div class="controls" id="controls">
-    <input id="secret" type="password" placeholder="Secret key">
-    <input id="setNumber" type="number" placeholder="Set days">
-    <input id="setPerson" type="text" placeholder="Person name">
-    <button onclick="applyChange()">Apply</button>
+  <div id="controls" style="display:none">
+    <input id="secret" type="password" placeholder="Secret">
+    <button onclick="addDay()">+1 day</button>
+    <button onclick="doubleTime()">×2 time</button>
   </div>
 </div>
 
-<!-- Firebase SDK -->
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
 
 <script>
-/* ================= CONFIG ================= */
-
-// 🔴 REPLACE THIS WITH YOUR FIREBASE CONFIG
+/* ===== CONFIG ===== */
 const firebaseConfig = {
   apiKey: "AIzaSyBLWQNTIC68JPrr1wkKSyzYpmc_9waVo3E",
   authDomain: "mute-counter.firebaseapp.com",
@@ -75,89 +42,87 @@ const firebaseConfig = {
   messagingSenderId: "1097181150070",
   appId: "1:1097181150070:web:56330e7781af0ab5d61857"
 };
-
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const ref = db.collection("config").doc("state");
 
-/* ================= HELPERS ================= */
+/* ===== HELPERS ===== */
+const DAY = 86400000;
 
-async function sha256(text){
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(buf)].map(x=>x.toString(16).padStart(2,"0")).join("");
+async function sha256(t){
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t));
+  return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
 }
 
-function today(){
-  const d=new Date();
-  return d.toISOString().slice(0,10);
+function fmt(ms){
+  ms=Math.max(0,ms);
+  const d=Math.floor(ms/DAY); ms%=DAY;
+  const h=Math.floor(ms/3600000); ms%=3600000;
+  const m=Math.floor(ms/60000); ms%=60000;
+  const s=Math.floor(ms/1000);
+  return `${d}d ${h}h ${m}m ${s}s`;
 }
 
-function daysBetween(a,b){
-  return Math.floor((new Date(b)-new Date(a))/86400000);
-}
-
-/* ================= CORE ================= */
+/* ===== CORE ===== */
+let state;
 
 async function load(){
-  const snap = await ref.get();
-  const data = snap.data();
+  const snap=await ref.get();
+  state=snap.data();
 
-  let count = data.count;
-  const todayStr = today();
-  const diff = daysBetween(data.lastDate, todayStr);
+  const now=Date.now();
+  const diff=now-state.lastUpdated;
+  state.remainingMs=Math.max(0,state.remainingMs-diff);
+  state.lastUpdated=now;
 
-  if(diff>0){
-    count = Math.max(0, count-diff);
-    await ref.update({ count, lastDate: todayStr });
-  }
+  await ref.update({
+    remainingMs: state.remainingMs,
+    lastUpdated: now
+  });
 
-  document.getElementById("count").textContent = count;
-  document.getElementById("person").textContent = data.person;
-
-  if(count>0){
-    const end=new Date();
-    end.setDate(end.getDate()+count);
-    document.getElementById("endNote").textContent =
-      "Ends on "+end.toDateString();
-  } else {
-    document.getElementById("endNote").textContent = "No active mute";
-  }
+  document.getElementById("person").textContent=state.person;
+  tick();
 }
 
-/* ================= ADMIN ================= */
-
-document.getElementById("adminBtn").onclick = ()=>{
-  document.getElementById("controls").style.display="grid";
-};
-
-async function applyChange(){
-  const secret = document.getElementById("secret").value;
-  if(!secret) return alert("Secret required");
-
-  const hash = await sha256(secret);
-  const snap = await ref.get();
-  const data = snap.data();
-
-  if(hash !== data.secretHash){
-    alert("Wrong secret");
-    return;
-  }
-
-  const updates = {};
-  const n = document.getElementById("setNumber").value;
-  const p = document.getElementById("setPerson").value;
-
-  if(n !== "") updates.count = Number(n);
-  if(p !== "") updates.person = p;
-
-  updates.lastDate = today();
-  await ref.update(updates);
-
-  alert("Updated");
-  location.reload();
+function tick(){
+  document.getElementById("time").textContent=fmt(state.remainingMs);
+  setTimeout(()=>{
+    state.remainingMs-=1000;
+    tick();
+  },1000);
 }
 
-/* ================= START ================= */
+/* ===== ADMIN ===== */
+function toggle(){
+  document.getElementById("controls").style.display="block";
+}
+
+async function auth(){
+  const s=document.getElementById("secret").value;
+  if(!s) throw "No secret";
+  const h=await sha256(s);
+  if(h!==state.secretHash) throw "Wrong secret";
+}
+
+async function addDay(){
+  try{
+    await auth();
+    state.remainingMs+=DAY;
+    state.lastUpdated=Date.now();
+    await ref.update(state);
+  }catch(e){alert(e);}
+}
+
+async function doubleTime(){
+  try{
+    await auth();
+    state.remainingMs*=2;
+    state.lastUpdated=Date.now();
+    await ref.update(state);
+  }catch(e){alert(e);}
+}
+
+/* ===== START ===== */
 load();
 </script>
 
