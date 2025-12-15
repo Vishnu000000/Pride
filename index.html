@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mute Timer — public view</title>
+<style>
+  :root{
+    --bg:#0f1724; --card:#0b1220; --muted:#9aa6bd; --accent:#7dd3fc;
+    --glass: rgba(255,255,255,0.03);
+  }
+  *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+  body{
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(180deg,#071024 0%, #071933 100%); color:#e6eef8;
+    padding:32px;
+  }
+  .card{
+    width:100%; max-width:820px; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+    border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(2,6,23,0.6);
+    border:1px solid rgba(255,255,255,0.03);
+  }
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  header h1{margin:0;font-size:1.25rem;letter-spacing:0.2px}
+  header p{margin:0;color:var(--muted);font-size:0.9rem}
+  .main{display:flex;gap:24px;flex-wrap:wrap;margin-top:18px;align-items:center}
+  .big{
+    flex:1 1 320px; background:var(--glass); padding:22px;border-radius:12px; text-align:center;
+    border:1px solid rgba(125,211,252,0.06);
+  }
+  .big .label{color:var(--muted); font-size:0.95rem}
+  .big .number{font-size:5rem; margin:6px 0; font-weight:700; line-height:1}
+  .big .person{font-size:1rem;color:var(--muted)}
+  .controls{flex:1 1 320px; display:grid; gap:10px; align-content:start}
+  button{
+    background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+    border:1px solid rgba(255,255,255,0.04); color:inherit; padding:10px 14px; border-radius:10px;
+    cursor:pointer; font-weight:600;
+  }
+  .btn-ghost{background:transparent;border:1px dashed rgba(255,255,255,0.04); color:var(--muted)}
+  .btn-danger{border-color:rgba(255,80,80,0.15)}
+  .small{font-size:0.9rem;color:var(--muted)}
+  .row{display:flex;gap:8px}
+  input[type="text"], input[type="number"], input[type="password"]{
+    width:100%; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.04);
+    background:transparent; color:inherit;
+  }
+  footer{margin-top:16px;color:var(--muted); font-size:0.85rem}
+  .muted-note{font-size:0.85rem;color:var(--muted); margin-top:8px}
+  .small-muted{color:var(--muted); font-size:0.82rem}
+  .flex-between{display:flex;justify-content:space-between;align-items:center;gap:12px}
+  @media (max-width:720px){
+    .main{flex-direction:column}
+    .big .number{font-size:3.5rem}
+  }
+</style>
+</head>
+<body>
+  <div class="card" role="main">
+    <header>
+      <div>
+        <h1>Mute Timer — public view</h1>
+        <p>Show a number of days you won't speak to someone. Visible to anyone who visits this page.</p>
+      </div>
+      <div class="small-muted">Static / client-side (GitHub Pages)</div>
+    </header>
+
+    <div class="main">
+      <div class="big" aria-live="polite">
+        <div class="label">Person</div>
+        <div class="person" id="personDisplay">someone</div>
+
+        <div class="label" style="margin-top:12px">Days remaining</div>
+        <div class="number" id="countDisplay">0</div>
+
+        <div class="muted-note" id="endDateNote"></div>
+      </div>
+
+      <div class="controls" aria-hidden="false">
+        <div class="row">
+          <button id="btnDouble">×2 (double)</button>
+          <button id="btnMinusOne">−1</button>
+          <button id="btnPlusOne">+1</button>
+        </div>
+
+        <div class="row">
+          <input id="setInput" type="number" placeholder="Set days (number)" min="0" />
+          <button id="btnSet">Set (requires secret)</button>
+        </div>
+
+        <div class="row">
+          <input id="personInput" type="text" placeholder="Person name (visible)" />
+          <button id="btnSetPerson">Change person (requires secret)</button>
+        </div>
+
+        <div class="row">
+          <button id="btnSetSecret" class="btn-ghost">Set / Change secret</button>
+          <button id="btnReset" class="btn-danger">Reset data (requires secret)</button>
+        </div>
+
+        <div class="small-muted">Tips: Only people you give the secret to can modify the value. Page visitors can only see the counter.</div>
+      </div>
+    </div>
+
+    <footer>
+      <div>How auto-decrement works: the page stores the last update date locally and subtracts the number of full days that passed since then. If you open the page after N days, the number will go down by N automatically (minimum 0).</div>
+    </footer>
+  </div>
+
+<script>
+/*
+  Simple client-only "mute timer".
+  Storage keys:
+    grudge_count: integer (days)
+    grudge_last: ISO date string 'YYYY-MM-DD' of last known day (local)
+    grudge_secret_hash: hex SHA-256 of passphrase
+    grudge_person: string for person name
+*/
+
+// Helpers
+const $ = id => document.getElementById(id);
+const todayLocalISO = (d=new Date()) => {
+  // Return local date as YYYY-MM-DD (so day boundaries follow user's local timezone)
+  const yy = d.getFullYear();
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${yy}-${mm}-${dd}`;
+};
+
+async function sha256Hex(text){
+  const enc = new TextEncoder();
+  const data = enc.encode(text);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+function readInt(key, fallback=0){
+  const v = localStorage.getItem(key);
+  if(v==null) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.floor(n) : fallback;
+}
+function saveInt(key, n){ localStorage.setItem(key, String(Math.floor(n))); }
+
+function readStr(key, fallback=''){ return localStorage.getItem(key) ?? fallback; }
+function saveStr(key, s){ localStorage.setItem(key, String(s)); }
+
+function daysBetweenISO(aISO, bISO){
+  // both in 'YYYY-MM-DD' local strings => compute integer day difference b - a
+  const a = new Date(aISO + 'T00:00:00');
+  const b = new Date(bISO + 'T00:00:00');
+  const ms = b.getTime() - a.getTime();
+  return Math.floor(ms / 86400000);
+}
+
+// Core logic
+function loadStateAndApplyElapsed(){
+  let count = readInt('grudge_count', 0);
+  let last = readStr('grudge_last', todayLocalISO());
+  const today = todayLocalISO();
+  const daysElapsed = daysBetweenISO(last, today);
+  if(daysElapsed > 0){
+    const newCount = Math.max(0, count - daysElapsed);
+    saveInt('grudge_count', newCount);
+    // Move last forward by the amount of days elapsed (set to today)
+    saveStr('grudge_last', today);
+    count = newCount;
+  }
+  // ensure last exists
+  if(!readStr('grudge_last')) saveStr('grudge_last', today);
+  return count;
+}
+
+function updateUI(){
+  const count = readInt('grudge_count', 0);
+  const person = readStr('grudge_person', 'someone');
+  $('countDisplay').textContent = String(count);
+  $('personDisplay').textContent = person || 'someone';
+
+  // compute approximate end date = today + count days (exclusive)
+  const idx = count;
+  if(idx <= 0){
+    $('endDateNote').textContent = 'No active mute.';
+  } else {
+    const now = new Date();
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + idx);
+    const opts = { year:'numeric', month:'short', day:'numeric' };
+    $('endDateNote').textContent = `If unchanged, the mute will end on ${end.toLocaleDateString(undefined, opts)} (count decrements once per local day).`;
+  }
+}
+
+// Protected operations require secret match. If no secret set, the first time this will let user set one.
+async function requireSecretAndRun(promptMessage, action){
+  const existing = readStr('grudge_secret_hash', '');
+  if(!existing){
+    // no secret yet — set a new one
+    const p1 = prompt('No secret exists yet. Set a passphrase now (will be stored hashed locally). Choose something you remember:');
+    if(!p1) return alert('Aborted: no secret set.');
+    const p2 = prompt('Confirm your passphrase:');
+    if(p1 !== p2) return alert('Passphrases did not match — aborted.');
+    const h = await sha256Hex(p1);
+    saveStr('grudge_secret_hash', h);
+    alert('Secret set. You can now modify values.');
+    return action(); // run action immediately after setting secret
+  } else {
+    const attempt = prompt(promptMessage || 'Enter secret passphrase to proceed:');
+    if(!attempt) return alert('Aborted.');
+    const attemptedHash = await sha256Hex(attempt);
+    if(attemptedHash === existing){
+      return action();
+    } else {
+      return alert('Incorrect secret — aborted.');
+    }
+  }
+}
+
+// Button actions
+async function doDouble(){
+  return requireSecretAndRun('Enter secret to double the current number:', () => {
+    const c = readInt('grudge_count',0);
+    const newc = c * 2;
+    saveInt('grudge_count', newc);
+    saveStr('grudge_last', todayLocalISO());
+    updateUI();
+  });
+}
+
+async function doPlusOne(){
+  return requireSecretAndRun('Enter secret to add +1 day:', () => {
+    const c = readInt('grudge_count',0);
+    saveInt('grudge_count', c + 1);
+    saveStr('grudge_last', todayLocalISO());
+    updateUI();
+  });
+}
+async function doMinusOne(){
+  return requireSecretAndRun('Enter secret to subtract 1 day:', () => {
+    const c = readInt('grudge_count',0);
+    saveInt('grudge_count', Math.max(0, c - 1));
+    saveStr('grudge_last', todayLocalISO());
+    updateUI();
+  });
+}
+async function doSetNumber(){
+  const v = Number($('setInput').value);
+  if(!Number.isFinite(v) || v < 0) return alert('Please enter a valid non-negative integer.');
+  const n = Math.floor(v);
+  return requireSecretAndRun('Enter secret to set the number to ' + n + ':', () => {
+    saveInt('grudge_count', n);
+    saveStr('grudge_last', todayLocalISO());
+    $('setInput').value = '';
+    updateUI();
+    alert('Number set.');
+  });
+}
+async function doSetPerson(){
+  const name = $('personInput').value.trim();
+  if(!name) return alert('Please type a visible name.');
+  return requireSecretAndRun('Enter secret to set visible person name to: ' + name, () => {
+    saveStr('grudge_person', name);
+    $('personInput').value = '';
+    updateUI();
+    alert('Person updated.');
+  });
+}
+async function doSetSecret(){
+  // allow changing secret even if one exists (requires old secret)
+  const existing = readStr('grudge_secret_hash','');
+  if(!existing){
+    // let requireSecretAndRun handle initial set
+    return requireSecretAndRun('', () => {});
+  } else {
+    const current = prompt('Enter current secret to change it:');
+    if(!current) return alert('Aborted.');
+    const curHash = await sha256Hex(current);
+    if(curHash !== existing) return alert('Wrong current secret — aborted.');
+    const p1 = prompt('Enter new passphrase:');
+    if(!p1) return alert('Aborted.');
+    const p2 = prompt('Confirm new passphrase:');
+    if(p1 !== p2) return alert('Passphrases did not match — aborted.');
+    const newHash = await sha256Hex(p1);
+    saveStr('grudge_secret_hash', newHash);
+    alert('Secret changed.');
+  }
+}
+async function doResetData(){
+  return requireSecretAndRun('Enter secret to erase all stored data (this is permanent on this browser):', () => {
+    localStorage.removeItem('grudge_count');
+    localStorage.removeItem('grudge_last');
+    localStorage.removeItem('grudge_person');
+    localStorage.removeItem('grudge_secret_hash');
+    alert('Data removed from this browser. You will need to set up again.');
+    location.reload();
+  });
+}
+
+// Wire up
+window.addEventListener('DOMContentLoaded', () => {
+  // On load, apply elapsed days
+  loadStateAndApplyElapsed();
+  updateUI();
+
+  $('btnDouble').addEventListener('click', doDouble);
+  $('btnPlusOne').addEventListener('click', doPlusOne);
+  $('btnMinusOne').addEventListener('click', doMinusOne);
+  $('btnSet').addEventListener('click', doSetNumber);
+  $('btnSetPerson').addEventListener('click', doSetPerson);
+  $('btnSetSecret').addEventListener('click', doSetSecret);
+  $('btnReset').addEventListener('click', doResetData);
+
+  // keyboard convenience: D = double, +, -, S set (reads input)
+  document.addEventListener('keydown', (ev) => {
+    if(ev.key === 'D' || ev.key === 'd'){ ev.preventDefault(); doDouble(); }
+    if(ev.key === '+'){ ev.preventDefault(); doPlusOne(); }
+    if(ev.key === '-'){ ev.preventDefault(); doMinusOne(); }
+    if(ev.key === 'S' || ev.key === 's'){ /* focus set input */ $('setInput').focus(); }
+  });
+});
+</script>
