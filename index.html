@@ -4,13 +4,60 @@
 <meta charset="utf-8">
 <title>Mute Timer</title>
 <style>
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-background:#0b1220;color:#e5eef8;font-family:system-ui}
-.card{background:#0f172a;padding:24px;border-radius:14px;width:360px;text-align:center}
-.number{font-size:2.2rem;font-weight:700;margin:10px 0}
-.small{color:#94a3b8;font-size:.85rem}
-button,input{width:100%;margin-top:8px;padding:10px;border-radius:8px;border:none}
-.admin{margin-top:12px;color:#7dd3fc;cursor:pointer;font-size:.85rem}
+body{
+  margin:0;
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:#0b1220;
+  color:#e5eef8;
+  font-family:system-ui;
+}
+
+.card{
+  width:100%;
+  min-height:100vh;
+  background:#0f172a;
+  padding:24px;
+  text-align:center;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+}
+
+.number{
+  font-size:3rem;
+  font-weight:700;
+  margin:12px 0;
+}
+
+.small{
+  color:#94a3b8;
+  font-size:.85rem;
+}
+
+button,input{
+  width:100%;
+  margin-top:8px;
+  padding:12px;
+  border-radius:8px;
+  border:none;
+}
+
+.admin{
+  margin-top:16px;
+  color:#7dd3fc;
+  cursor:pointer;
+  font-size:.9rem;
+}
+
+@media (min-width: 768px){
+  .number{
+    font-size:5rem;
+  }
+}
+
 </style>
 </head>
 <body>
