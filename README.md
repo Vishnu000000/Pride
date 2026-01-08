@@ -1,202 +1,376 @@
-# DREAM Android — Professor Demo Brief
+# DREAM Android — Professor Demo Brief (Defense-Ready)
+
+This document is meant to handle **cross-questioning**. It explains what happens at:
+- **UI level** (browser)
+- **API level** (FastAPI endpoints)
+- **terminal level** (uvicorn logs + adb/perfetto commands)
+- **file/artifact level** (`uploads/`, `traces/`, `csv_out/`, `features/`, `model_out/`)
+
+---
 
 ## 1) One-line pitch
-DREAM Android is a practical APK security analyzer that combines static inspection with real-device dynamic tracing (Perfetto) and a multi-label ML model to produce explainable privacy/security risk labels and an overall risk score.
+DREAM Android is a practical APK/XAPK security analyzer that combines:
+- **static inspection** (manifest/permissions/components + lightweight APK metadata)
+- **real-device dynamic tracing** (Perfetto on a physical Android device)
+- **multi-label ML** (predicts multiple risk labels at once)
 
-## 2) What we built (end-to-end workflow)
-- **Web UI**: Upload APK/XAPK → Analyze → View risk score + labels → Retrain model.
-- **Backend orchestration (FastAPI)**:
-  - Stores uploads + metadata in **SQLite (`uploads.db`)**
-  - Runs static feature extraction from APK
-  - Optionally runs dynamic analysis on a **real Android device** via **ADB**
-  - Runs ML inference using a trained model bundle
-  - Returns a single JSON result with:
-    - overall risk score
-    - high-level risk breakdown
-    - detailed labels
-    - whether dynamic + ML were actually used
-    - timing (static/dynamic/total)
+to produce **explainable risk labels** and an overall **risk score**.
 
-## 3) Dynamic analysis (what happens on the device)
-- Installs the app on the connected device.
-- Launches the app (monkey fallback) to trigger runtime behavior.
-- Records a **Perfetto trace (~30s)**.
-- Pulls trace back to host and extracts CSV signals.
-- Extracts dynamic features into a fixed schema feature row.
+---
 
-## 4) ML model (how it is used)
-- We train a **multi-label** classifier (predicts multiple risk labels at once).
-- Training data sources:
-  - curated dataset (`training_set`)
-  - labeled uploads from the UI workflow
-- Prediction uses **static + dynamic** features (when dynamic is available).
-- Output is a set of **per-label probabilities**, which are combined with a static baseline (to avoid near-zero results on real apps).
+## 2) What the professor should understand first (big picture)
+Static analysis can miss runtime-only behaviors:
+- delayed execution
+- dynamic code loading
+- emulator detection
 
-## 5) What we tackled / major engineering problems solved
-- **Real package name detection (APK + XAPK)**
-  - Robustly extracts `com.*` identifiers so install/launch works reliably.
-- **Reliable dynamic pipeline**
-  - Trace capture + pull + CSV extraction + feature extraction are now consistent.
-- **Dynamic feature naming consistency**
-  - Ensures dynamic features are non-zero and ML actually gets used.
-- **Believable risk score calibration**
-  - Risk score remains monotonic with model outputs while producing demo-realistic values.
-- **Retrain UX**
-  - Shows trained/untrained counts and last retrain status.
-- **Device workflow stability**
-  - Recheck device status and run dynamic only when device is available.
+So our system captures runtime evidence on a **real device** and turns it into structured features for ML.
 
-## 6) Demo script (2–3 minutes)
-1. **Show device connected** in UI.
-2. Upload an APK (example: Messenger) → click **Analyze**.
-3. Explain the pipeline while it runs:
-   - static signals extracted
-   - app installed/launched
-   - Perfetto trace captured
-   - features extracted
-   - ML predicts multiple labels
-4. Show results:
-   - overall risk score + tier
-   - high-level risks
-   - detailed labels
-   - dynamic OK + ML active
-   - timing breakdown
-5. (Optional) click **Retrain Model** and show stats update.
+---
 
-## 7) Current system status (from latest run)
-- Device connected and dynamic traces succeed.
-- Example run:
-  - Package: `com.facebook.orca`
-  - Dynamic OK: Yes
-  - ML Active: Yes
-  - Total time: ~56.7s (static ~3.8s, dynamic ~52.9s)
+## 3) How to run it (terminal commands)
+### Backend
+From `~/apksec_project`:
+```bash
+source venv/bin/activate
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
 
-## 8) Limitations (honest)
-- **Scalability**: relies on real devices; parallelism is limited.
-- **Interaction depth**: monkey automation may not reach login-gated behavior.
-- **Delayed malware**: sophisticated malware can sleep/trigger later than the trace window.
-- **Labeling quality**: ML quality depends heavily on labeling correctness and dataset diversity.
+Expected in terminal:
+- `Found model at: model_out/model_labels.joblib`
+- `Uvicorn running on http://0.0.0.0:8000`
 
-## 9) Future work (practical next steps)
-- Better interaction automation (UIAutomator scripts / recorded flows).
-- Longer or adaptive tracing windows for suspicious apps.
-- Richer network evidence (optional PCAPDroid, DNS/HTTP metadata features).
-- Stronger model evaluation report (time-based split + ablations).
-- Explainability improvements (top features per label, evidence snippets).
+### Frontend
+The UI is a static page (served separately). It talks to FastAPI through HTTP.
 
-## 10) Terminal-level: what actually happens (commands + artifacts)
+---
 
-### Backend start
-- Start backend:
-  - `python -m uvicorn api.main:app --host 0.0.0.0 --port 8000`
-- Expected log:
-  - `Found model at: model_out/model_labels.joblib`
+## 4) Frontend → Backend flow (exact endpoints)
+### Device check
+The UI periodically calls:
+- `GET /api/check_device`
 
-### Analyze request lifecycle (high level)
-When the UI calls `POST /analyze`, the backend:
-- Saves upload into `uploads/` (timestamped filename)
-- Detects the Android package name (APK or XAPK)
-- Runs static feature extraction
-- Runs dynamic analysis (if enabled + device is connected)
-- Loads latest dynamic features from `features/`
-- Runs ML inference and returns a JSON response
+Purpose:
+- confirms ADB connectivity
+- returns device serial if present
 
-### Dynamic analysis: device + perfetto + processing
-The dynamic runner (`tools/run_dynamic_analysis.py`) performs:
-- Install:
-  - `adb install -r <apk>` (or `adb install-multiple -r ...` for split APKs)
-- Launch:
-  - tries `adb shell am start -n <pkg>/<activity>`
-  - fallback: `adb shell monkey -p <package> -c android.intent.category.LAUNCHER 1`
-- Trace capture (~30s):
-  - `adb shell perfetto --txt --config - --out /data/misc/perfetto-traces/<package>.trace`
-- Pull trace:
-  - `adb pull /data/misc/perfetto-traces/<package>.trace traces/<package>.trace`
-- Extract CSVs:
-  - `python extract_csvs.py traces/<package>.trace csv_out/`
-- Extract features:
-  - `python feature_extractor.py <package>`
+In UI you see:
+- Device `Connected` / `Not Connected`
 
-### Files to point to during cross-questioning
-- **Uploaded APKs**: `uploads/<timestamp>_<filename>.apk`
-- **Perfetto traces**: `traces/<package>.trace`
-- **Extracted CSV evidence**: `csv_out/<package>.*.csv`
-- **Final dynamic feature row**: `features/<package>.features.csv`
-- **Trained model bundle**: `model_out/model_labels.joblib`
-- **Upload metadata DB**: `uploads.db`
+### Analysis request
+When you click **Analyze**, the UI does:
+- `POST /analyze` with multipart form-data:
+  - `file`: APK or XAPK
+  - `consent`: (flag to allow dynamic analysis)
 
-### Recognizing success/failure quickly in logs
-- Dynamic success indicators:
-  - `Successfully installed <package>`
-  - `Successfully launched <package> using monkey`
-  - `Perfetto trace completed successfully`
-  - `Enhanced features written: .../features/<package>.features.csv`
-- Common non-fatal noise:
-  - PTY warning about stdin not being a terminal (trace still succeeds)
+While this is running:
+- UI shows an overlay “Analyzing APK…”
+- UI disables the Analyze button
 
-## 11) Frontend-level: what the UI calls and how it maps to results
+### Training stats / retrain
+The UI polls:
+- `GET /admin/stats`
 
-### API calls made by the UI
-- **Device status**:
-  - `GET /api/check_device`
-  - Used to show: Connected / Not connected + device id
-- **Train stats**:
-  - `GET /admin/stats`
-  - Used to show: total uploads, trained/untrained counts, last retrain summary
-- **Analyze**:
-  - `POST /analyze` with multipart form data `file=<apk/xapk>`
-- **Retrain**:
-  - `POST /retrain`
+And retrain triggers:
+- `POST /retrain`
 
-### Key response fields used by UI (what to explain)
-- `risk_score`:
-  - overall risk percent shown in big text
-- `analysis_level`:
-  - `with_dynamic` vs `static_only`
-- `meta.dynamic_used`:
-  - whether dynamic features were found and used
-- `meta.dynamic_ok`:
-  - whether the dynamic pipeline succeeded
-- `meta.ml_effective`:
-  - whether ML was applied (model loaded + features available + predict succeeded)
-- `protocol_percentages`:
-  - per-label probabilities shown as “Detailed Security Labels”
-- `high_level_percentages`:
-  - grouped risk categories shown in “High-Level Risks”
-- `timing.total_s/static_s/dynamic_s`:
-  - used for the time breakdown line
+The stats show:
+- total uploads
+- trained vs untrained
+- last retrain result
 
-### Where the logic lives (backend entry points)
-- `POST /analyze` endpoint in `api/main.py`
-- Core scoring happens in `analyze_apk_core(...)`
-- Dynamic orchestration shells out to `tools/run_dynamic_analysis.py`
-- Model training is `train_labels.py` (saved to `model_out/model_labels.joblib`)
+---
 
-## 12) Cross-questioning (expected questions + short answers)
+## 5) What happens inside `/analyze` (backend pipeline)
+The backend does (conceptually):
 
-### Q: Why not only static analysis?
-A: Static can miss runtime-only behaviors (delayed actions, dynamic loading, environment-triggered behavior). Dynamic tracing on a real device captures what actually happens.
+### Step A — store upload
+- Writes file under:
+  - `uploads/<timestamp>_<original_filename>`
+- Inserts upload metadata into `uploads.db`.
 
-### Q: Why real device instead of emulator?
-A: Many malware families detect emulators and hide behavior. Real-device execution reduces that evasive gap.
+### Step B — package name detection (critical)
+We must find the **real Android package id** (e.g., `com.facebook.orca`).
 
-### Q: What exactly do you capture in dynamic analysis?
-A: A Perfetto trace that can yield process/thread scheduling signals and app activity summaries; then we convert to CSVs and finally to a fixed feature table so apps are comparable.
+Why this matters:
+- ADB install/launch/trace naming depend on package id
+- If we use a wrong package name, `adb shell monkey -p ...` fails
 
-### Q: How do you know ML is actually used?
-A: The response contains `meta.ml_effective=true` and the UI shows “ML Model: Active”. This only happens when a model is loaded and dynamic features are available.
+How we detect:
+- **APK**: read `AndroidManifest.xml` (using parsing/fallback tools)
+- **XAPK**: parse the XAPK `manifest.json` if present (XAPK is a container of one or more APKs)
 
-### Q: Can dynamic fail? What happens then?
-A: Yes (ABI mismatch, install/launch failure, tracing failure). In that case we still return static analysis and mark dynamic/ML as inactive so the UI is honest.
+In terminal you see:
+- `[INFO] Detected package: com.facebook.orca`
 
-### Q: What is your model and why this choice?
-A: Multi-label, per-label classifiers with calibrated probabilities. SVM is fast at inference and calibration provides probabilities for UI risk scoring.
+### Step C — static analysis
+Runs static feature extraction:
+- permissions and manifest indicators
+- size / component counts
+- other lightweight signals
 
-### Q: Is the model trained on enough data?
-A: Some labels may be rare in the dataset; the training script falls back to simpler classifiers for rare labels to avoid instability. As we collect more labeled apps, per-label performance improves.
+This is fast (few seconds).
 
-### Q: What makes the score “explainable”?
-A: We show per-risk-label probabilities and grouped high-level categories, rather than only a single “malicious/benign” bit.
+### Step D — dynamic analysis (if device connected + consent)
+If a device is available, the backend calls the dynamic runner.
+Artifacts produced:
+- `traces/<package>.trace`
+- `csv_out/<package>.*.csv`
+- `features/<package>.features.csv`
 
-### Q: What are the main limitations?
-A: Scalability (real devices), limited interaction depth (monkey), and delayed malware may trigger outside the trace window.
+Terminal logs typically show:
+- `[DYNAMIC] Installing <package>...`
+- `[DYNAMIC] Successfully installed <package>`
+- `[DYNAMIC] Attempting to launch <package>...`
+- `[DYNAMIC] Starting Perfetto trace...`
+- `[DYNAMIC] Perfetto trace completed successfully`
+- `[OK] Enhanced features written: features/<package>.features.csv`
+
+### Step E — ML inference + risk scoring
+If the dynamic features file is found and the model bundle exists:
+- backend loads `model_out/model_labels.joblib`
+- vectorizes features using the model’s saved feature schema
+- predicts probabilities for each risk label
+
+Output is then combined with static baseline to avoid “near-zero” results when static signals already indicate risk.
+
+Return JSON includes:
+- overall risk score (0–100)
+- high-level risks (% breakdown)
+- detailed label probabilities
+- flags:
+  - `dynamic_used`
+  - `dynamic_ok`
+  - `ml_effective`
+- timing breakdown
+
+---
+
+## 6) Dynamic analysis: what exactly is “monkey fallback”?
+### What is `monkey`?
+Android Monkey is a tool that sends pseudo-random UI events to an app to simulate interaction.
+
+We use it primarily as a **reliable launcher**:
+- Some apps don’t have a single obvious launch activity.
+- `am start` may fail depending on exported activities.
+- Monkey can launch using the package id.
+
+Conceptually the command is:
+```bash
+adb shell monkey -p <package> -c android.intent.category.LAUNCHER 1
+```
+
+So “monkey fallback” means:
+- we tried a direct launch mechanism
+- if that fails, we launch via Monkey so the app is actually running during tracing
+
+Why the professor should like this:
+- it increases robustness across different apps
+- reduces manual intervention
+
+---
+
+## 7) Perfetto: what we capture and why
+Perfetto records system-level traces:
+- process/thread activity
+- scheduling
+- CPU and runtime events
+- other OS-level signals depending on trace config
+
+Why Perfetto:
+- structured, modern tracing
+- works on real devices
+- more stable than ad-hoc log scraping
+
+Trace duration:
+- configured around **~30 seconds** for demo practicality
+
+---
+
+## 8) Files produced (artifacts to show during cross-questions)
+After a successful dynamic run for package `com.facebook.orca`, you will see:
+
+- **Upload:**
+  - `uploads/<timestamp>_Messenger_...apk`
+- **Perfetto trace:**
+  - `traces/com.facebook.orca.trace`
+- **Extracted CSVs:**
+  - `csv_out/com.facebook.orca.process.csv`
+  - `csv_out/com.facebook.orca.thread.csv`
+  - `csv_out/com.facebook.orca.slice.csv`
+- **Final features used by ML:**
+  - `features/com.facebook.orca.features.csv`
+- **ML model bundle:**
+  - `model_out/model_labels.joblib`
+- **DB:**
+  - `uploads.db`
+
+If professor asks “how do you know dynamic really happened?”:
+- point to `features/<package>.features.csv`
+- point to uvicorn logs showing install/launch/trace/pull/feature extraction
+
+---
+
+## 9) ML model details (what it is, and how it handles low data)
+### 9.1 Labels predicted (multi-label output)
+We do not predict only “malware vs benign”. Instead the model predicts **multiple risk labels simultaneously** (examples from our label set):
+- `privacy_leak`
+- `tracking_ads`
+- `insecure_communication`
+- `weak_cryptography`
+- `data_exposure`
+- `exported_components`
+- `native_code_risk`
+- `code_obfuscation`
+- `malicious_behavior`
+
+Why this matters:
+- One app can be safe in one dimension but risky in another.
+- The output is easier to explain: “why is it risky?” not just “is it malware?”.
+
+### 9.2 What model is used (exact structure)
+The trained file `model_out/model_labels.joblib` is a **model bundle** (saved using `joblib`) containing:
+- the trained model object (`PerLabelModel`)
+- the **ordered feature schema** (`feature_columns`)
+- the list of labels
+- a version id (timestamp)
+
+The predictor is **per-label binary classification**:
+- We train **one binary classifier per label** (14 classifiers).
+- At inference time we run all of them and collect probabilities.
+
+Core estimator (for labels with enough data):
+- `StandardScaler` + `LinearSVC` (linear SVM)
+- wrapped by `CalibratedClassifierCV(method="sigmoid", cv=3)` to produce probabilities.
+
+### 9.3 Why Linear SVM + calibration (latency vs accuracy trade-off)
+This choice is specifically for a good **accuracy/latency** balance on CPU:
+
+- **Latency (fast inference):**
+  - Linear models compute a dot-product (`w·x + b`) which is very fast.
+  - With ~14 labels, we do ~14 linear predictions (still fast).
+  - Calibration adds small overhead but remains lightweight compared to tree ensembles.
+
+- **Accuracy (good for sparse/engineered features):**
+  - Our feature set is engineered numeric signals (static + dynamic counts/ratios).
+  - Linear decision boundaries often work well in this setting.
+  - `class_weight="balanced"` helps with imbalanced labels.
+
+- **Why probability calibration:**
+  - `LinearSVC` does not natively output probabilities.
+  - The UI needs probabilities for risk bars and score composition.
+  - Calibration learns a mapping from raw SVM scores to probabilities (sigmoid/Platt scaling), improving interpretability.
+
+In short:
+- A deep model would be heavy.
+- Random forests / gradient boosting can be slower and harder to calibrate.
+- Linear SVM is a strong baseline for speed + reasonable accuracy.
+
+### 9.4 Feature vector (what goes into ML)
+At inference time, we build a single feature dict from:
+- **Static features:** permissions, manifest/component indicators, size-related signals.
+- **Dynamic features:** extracted from Perfetto → CSV → aggregated numeric features.
+
+We then vectorize into a fixed order using the saved `feature_columns` list. This is critical:
+- the model expects the same schema at training and inference
+- missing features default to 0
+
+### 9.5 Training data and retraining semantics
+Training reads a structured dataset (`app_security_dataset.csv`) where:
+- each row = one analyzed app
+- columns = features + label columns
+
+Retraining combines:
+- a baseline dataset (`training_set` / curated examples)
+- new labeled uploads recorded in `uploads.db`
+
+### 9.6 What happens when data is insufficient (robust fallbacks)
+Some labels can be rare early on. The training script handles this safely:
+
+- **If a label has only one class present** (all 0 or all 1):
+  - uses `DummyClassifier(strategy="constant")`
+  - meaning: we do not pretend to learn a boundary when there is no information.
+
+- **If one class is too rare** (minority count < 3):
+  - falls back to **Logistic Regression** (still fast, more stable than CV calibration on tiny data)
+
+So the system remains runnable even as the dataset grows over time.
+
+### 9.7 How ML affects the final output
+The ML probabilities do not replace static analysis. We combine them:
+- static analysis provides a baseline risk probability per label
+- ML updates/refines the label probability when dynamic features exist
+
+This avoids the failure mode where “ML outputs near-zero everywhere” even when static signals are clearly risky.
+
+### 9.8 What to say if asked about latency
+In the end-to-end pipeline, most time is **dynamic tracing** (~30–60s).
+ML inference is typically **milliseconds** relative to trace collection.
+So we optimize ML for:
+- low inference overhead
+- stable probabilities for UI
+
+---
+
+## 10) What the UI shows (and why these fields matter)
+After analysis completes, the UI displays:
+- **Overall Risk Score** (0–100)
+- **Risk tier** (low/medium/high) using current thresholds
+- **Confidence**
+- **Analysis Mode**
+  - indicates whether dynamic was used
+- **Dynamic Features: Yes/No**
+- **Dynamic OK: Yes/No**
+  - shows whether trace + feature extraction succeeded
+- **ML Model: Active/Inactive**
+- **Package** and **File**
+- **Timing**: total/static/dynamic seconds
+- **High-level risks** (privacy/security/network/etc.)
+- **Detailed security labels** (bars)
+
+If professor asks “how do you know ML was used?”
+- show `ML Model: Active`
+- show `ML Used: Yes`
+
+---
+
+## 11) Demo script (defense-ready)
+### 0) Pre-demo checklist (30 seconds)
+- backend running
+- device connected in UI
+- model exists at `model_out/model_labels.joblib`
+
+### 1) Start the demo
+1. Show UI device status = Connected.
+2. Upload an APK (Messenger is a good example).
+3. Click Analyze.
+
+### 2) While it runs, narrate what happens
+- “We first detect the package id from manifest, because all ADB control depends on package name.”
+- “We extract static features immediately.”
+- “Then we install and launch on the real device. If direct launch fails, we use Android Monkey as a robust launcher.”
+- “We collect a ~30s Perfetto trace, pull it, convert to CSV, and extract structured features.”
+- “Then ML predicts multiple risk labels and we combine static + ML outputs.”
+
+### 3) Show evidence
+- point to terminal logs and the generated files in `traces/`, `csv_out/`, `features/`.
+
+### 4) Close
+- show risk score + top labels
+- mention retrain workflow briefly (optional click)
+
+---
+
+## 12) Limitations (answer honestly)
+- Real-device requirement limits scalability.
+- Monkey interaction is shallow; login-gated features may not be exercised.
+- Some malware may delay beyond trace window.
+- ML label quality depends on labeling and dataset size.
+
+---
+
+## 13) Future work (concrete)
+- UIAutomator scripted interactions for deeper coverage.
+- Adaptive trace duration based on early suspicious signals.
+- Add stronger network evidence pipeline.
+- Better explainability: “why this label fired” with top contributing features.
