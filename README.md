@@ -83,3 +83,120 @@ DREAM Android is a practical APK security analyzer that combines static inspecti
 - Richer network evidence (optional PCAPDroid, DNS/HTTP metadata features).
 - Stronger model evaluation report (time-based split + ablations).
 - Explainability improvements (top features per label, evidence snippets).
+
+## 10) Terminal-level: what actually happens (commands + artifacts)
+
+### Backend start
+- Start backend:
+  - `python -m uvicorn api.main:app --host 0.0.0.0 --port 8000`
+- Expected log:
+  - `Found model at: model_out/model_labels.joblib`
+
+### Analyze request lifecycle (high level)
+When the UI calls `POST /analyze`, the backend:
+- Saves upload into `uploads/` (timestamped filename)
+- Detects the Android package name (APK or XAPK)
+- Runs static feature extraction
+- Runs dynamic analysis (if enabled + device is connected)
+- Loads latest dynamic features from `features/`
+- Runs ML inference and returns a JSON response
+
+### Dynamic analysis: device + perfetto + processing
+The dynamic runner (`tools/run_dynamic_analysis.py`) performs:
+- Install:
+  - `adb install -r <apk>` (or `adb install-multiple -r ...` for split APKs)
+- Launch:
+  - tries `adb shell am start -n <pkg>/<activity>`
+  - fallback: `adb shell monkey -p <package> -c android.intent.category.LAUNCHER 1`
+- Trace capture (~30s):
+  - `adb shell perfetto --txt --config - --out /data/misc/perfetto-traces/<package>.trace`
+- Pull trace:
+  - `adb pull /data/misc/perfetto-traces/<package>.trace traces/<package>.trace`
+- Extract CSVs:
+  - `python extract_csvs.py traces/<package>.trace csv_out/`
+- Extract features:
+  - `python feature_extractor.py <package>`
+
+### Files to point to during cross-questioning
+- **Uploaded APKs**: `uploads/<timestamp>_<filename>.apk`
+- **Perfetto traces**: `traces/<package>.trace`
+- **Extracted CSV evidence**: `csv_out/<package>.*.csv`
+- **Final dynamic feature row**: `features/<package>.features.csv`
+- **Trained model bundle**: `model_out/model_labels.joblib`
+- **Upload metadata DB**: `uploads.db`
+
+### Recognizing success/failure quickly in logs
+- Dynamic success indicators:
+  - `Successfully installed <package>`
+  - `Successfully launched <package> using monkey`
+  - `Perfetto trace completed successfully`
+  - `Enhanced features written: .../features/<package>.features.csv`
+- Common non-fatal noise:
+  - PTY warning about stdin not being a terminal (trace still succeeds)
+
+## 11) Frontend-level: what the UI calls and how it maps to results
+
+### API calls made by the UI
+- **Device status**:
+  - `GET /api/check_device`
+  - Used to show: Connected / Not connected + device id
+- **Train stats**:
+  - `GET /admin/stats`
+  - Used to show: total uploads, trained/untrained counts, last retrain summary
+- **Analyze**:
+  - `POST /analyze` with multipart form data `file=<apk/xapk>`
+- **Retrain**:
+  - `POST /retrain`
+
+### Key response fields used by UI (what to explain)
+- `risk_score`:
+  - overall risk percent shown in big text
+- `analysis_level`:
+  - `with_dynamic` vs `static_only`
+- `meta.dynamic_used`:
+  - whether dynamic features were found and used
+- `meta.dynamic_ok`:
+  - whether the dynamic pipeline succeeded
+- `meta.ml_effective`:
+  - whether ML was applied (model loaded + features available + predict succeeded)
+- `protocol_percentages`:
+  - per-label probabilities shown as “Detailed Security Labels”
+- `high_level_percentages`:
+  - grouped risk categories shown in “High-Level Risks”
+- `timing.total_s/static_s/dynamic_s`:
+  - used for the time breakdown line
+
+### Where the logic lives (backend entry points)
+- `POST /analyze` endpoint in `api/main.py`
+- Core scoring happens in `analyze_apk_core(...)`
+- Dynamic orchestration shells out to `tools/run_dynamic_analysis.py`
+- Model training is `train_labels.py` (saved to `model_out/model_labels.joblib`)
+
+## 12) Cross-questioning (expected questions + short answers)
+
+### Q: Why not only static analysis?
+A: Static can miss runtime-only behaviors (delayed actions, dynamic loading, environment-triggered behavior). Dynamic tracing on a real device captures what actually happens.
+
+### Q: Why real device instead of emulator?
+A: Many malware families detect emulators and hide behavior. Real-device execution reduces that evasive gap.
+
+### Q: What exactly do you capture in dynamic analysis?
+A: A Perfetto trace that can yield process/thread scheduling signals and app activity summaries; then we convert to CSVs and finally to a fixed feature table so apps are comparable.
+
+### Q: How do you know ML is actually used?
+A: The response contains `meta.ml_effective=true` and the UI shows “ML Model: Active”. This only happens when a model is loaded and dynamic features are available.
+
+### Q: Can dynamic fail? What happens then?
+A: Yes (ABI mismatch, install/launch failure, tracing failure). In that case we still return static analysis and mark dynamic/ML as inactive so the UI is honest.
+
+### Q: What is your model and why this choice?
+A: Multi-label, per-label classifiers with calibrated probabilities. SVM is fast at inference and calibration provides probabilities for UI risk scoring.
+
+### Q: Is the model trained on enough data?
+A: Some labels may be rare in the dataset; the training script falls back to simpler classifiers for rare labels to avoid instability. As we collect more labeled apps, per-label performance improves.
+
+### Q: What makes the score “explainable”?
+A: We show per-risk-label probabilities and grouped high-level categories, rather than only a single “malicious/benign” bit.
+
+### Q: What are the main limitations?
+A: Scalability (real devices), limited interaction depth (monkey), and delayed malware may trigger outside the trace window.
