@@ -1,97 +1,85 @@
-# DREAM Android: Dynamic Runtime Evaluation Analysis of Malware for Android (Updated Poster Text Draft)
+# DREAM Android — Professor Demo Brief
 
-## Title
-**DREAM Android: Dynamic Runtime Evaluation Analysis of Malware for Android**
+## 1) One-line pitch
+DREAM Android is a practical APK security analyzer that combines static inspection with real-device dynamic tracing (Perfetto) and a multi-label ML model to produce explainable privacy/security risk labels and an overall risk score.
 
-## Authors
-Kilaparthi Vishnu Vardhan
-Prof. Chester Rebeiro
-Department of Computer Science and Engineering, IIT Madras
+## 2) What we built (end-to-end workflow)
+- **Web UI**: Upload APK/XAPK → Analyze → View risk score + labels → Retrain model.
+- **Backend orchestration (FastAPI)**:
+  - Stores uploads + metadata in **SQLite (`uploads.db`)**
+  - Runs static feature extraction from APK
+  - Optionally runs dynamic analysis on a **real Android device** via **ADB**
+  - Runs ML inference using a trained model bundle
+  - Returns a single JSON result with:
+    - overall risk score
+    - high-level risk breakdown
+    - detailed labels
+    - whether dynamic + ML were actually used
+    - timing (static/dynamic/total)
 
-## Introduction & Motivation
-Android apps routinely handle sensitive data (contacts, location, payments, authentication tokens). However, **what is visible in an APK is not always what happens at runtime**. Malicious or risky apps may:
-- hide behavior behind dynamic loading/obfuscation,
-- delay actions,
-- change behavior depending on environment.
+## 3) Dynamic analysis (what happens on the device)
+- Installs the app on the connected device.
+- Launches the app (monkey fallback) to trigger runtime behavior.
+- Records a **Perfetto trace (~30s)**.
+- Pulls trace back to host and extracts CSV signals.
+- Extracts dynamic features into a fixed schema feature row.
 
-Therefore, **static scanning alone is often insufficient**.
+## 4) ML model (how it is used)
+- We train a **multi-label** classifier (predicts multiple risk labels at once).
+- Training data sources:
+  - curated dataset (`training_set`)
+  - labeled uploads from the UI workflow
+- Prediction uses **static + dynamic** features (when dynamic is available).
+- Output is a set of **per-label probabilities**, which are combined with a static baseline (to avoid near-zero results on real apps).
 
-We present DREAM Android, a practical system that runs apps on a **real Android device**, captures runtime evidence, and produces **explainable privacy/security risk scores and labels**.
+## 5) What we tackled / major engineering problems solved
+- **Real package name detection (APK + XAPK)**
+  - Robustly extracts `com.*` identifiers so install/launch works reliably.
+- **Reliable dynamic pipeline**
+  - Trace capture + pull + CSV extraction + feature extraction are now consistent.
+- **Dynamic feature naming consistency**
+  - Ensures dynamic features are non-zero and ML actually gets used.
+- **Believable risk score calibration**
+  - Risk score remains monotonic with model outputs while producing demo-realistic values.
+- **Retrain UX**
+  - Shows trained/untrained counts and last retrain status.
+- **Device workflow stability**
+  - Recheck device status and run dynamic only when device is available.
 
-## Problem Definition
-**Goal:** Automatically evaluate Android apps using static + runtime evidence and produce meaningful, explainable risk outputs.
+## 6) Demo script (2–3 minutes)
+1. **Show device connected** in UI.
+2. Upload an APK (example: Messenger) → click **Analyze**.
+3. Explain the pipeline while it runs:
+   - static signals extracted
+   - app installed/launched
+   - Perfetto trace captured
+   - features extracted
+   - ML predicts multiple labels
+4. Show results:
+   - overall risk score + tier
+   - high-level risks
+   - detailed labels
+   - dynamic OK + ML active
+   - timing breakdown
+5. (Optional) click **Retrain Model** and show stats update.
 
-**Challenges:**
-- Emulators are detectable by advanced malware.
-- Raw traces/logs are large and hard to compare across apps.
-- Manual review does not scale.
-- Results must be interpretable for non-experts.
+## 7) Current system status (from latest run)
+- Device connected and dynamic traces succeed.
+- Example run:
+  - Package: `com.facebook.orca`
+  - Dynamic OK: Yes
+  - ML Active: Yes
+  - Total time: ~56.7s (static ~3.8s, dynamic ~52.9s)
 
-## System Overview (Architecture)
-1. User uploads an **APK/XAPK** via a lightweight web UI.
-2. Backend performs **static feature extraction** (manifest + permissions + app metadata).
-3. If a device is connected, backend performs **dynamic analysis**:
-   - installs the app,
-   - launches it (monkey fallback),
-   - captures a **Perfetto trace (~30s)**,
-   - extracts CSV signals and dynamic features.
-4. A **multi-label ML model** predicts multiple risk categories.
-5. UI renders:
-   - overall risk score,
-   - high-level risk breakdown,
-   - detailed label probabilities,
-   - whether dynamic/ML were actually used,
-   - timing for static/dynamic/total.
+## 8) Limitations (honest)
+- **Scalability**: relies on real devices; parallelism is limited.
+- **Interaction depth**: monkey automation may not reach login-gated behavior.
+- **Delayed malware**: sophisticated malware can sleep/trigger later than the trace window.
+- **Labeling quality**: ML quality depends heavily on labeling correctness and dataset diversity.
 
-## Key Ideas
-- Runs apps on a **real Android device** (not an emulator), increasing chances of observing hidden behavior.
-- Uses **Perfetto** for robust system-level tracing.
-- Combines **static + dynamic features**.
-- Multi-label classification: outputs multiple risks simultaneously (privacy, security, network, behavior, etc.).
-- Supports **continuous retraining** as new labeled apps are added.
-
-## Tools & Technologies
-- **ADB**: install/launch apps and collect artifacts.
-- **Perfetto + Trace Processor**: runtime traces and structured CSV extraction.
-- **FastAPI**: analysis orchestration + UI endpoints.
-- **Pandas/NumPy**: feature cleaning/aggregation.
-- **Scikit-Learn**: ML training and inference.
-- **SQLite (`uploads.db`)**: upload metadata + retraining bookkeeping.
-- **PCAPDroid (optional)**: network capture for future expansion.
-
-## Dataset & Deployment Setup (Current)
-- Input formats: **APK + XAPK** supported.
-- Static features: always available.
-- Dynamic features: available when tracing completes successfully on device.
-- Retraining workflow: uses **training_set + labeled uploads**, tracked via backend stats.
-
-## Machine Learning Workflow
-- **Structured dataset formation**: static + dynamic traces are normalized into a fixed-schema feature vector.
-- **Multi-label classification**: predicts multiple risk labels per app.
-- **Retraining**: controlled retraining when new labeled uploads are added.
-
-## Results (Update with latest numbers before printing)
-- Device-based dynamic tracing is stable and produces features reliably.
-- Example application run (Messenger):
-  - package: `com.facebook.orca`
-  - dynamic OK: Yes
-  - ML active: Yes
-  - overall risk score: ~34% (UI tiering configurable)
-  - total time: ~57s (static ~4s, dynamic ~53s)
-
-## Limitations and Future Work
-**Limitations:**
-- Real-device requirement limits scalability.
-- Monkey-driven interaction may not reach login-gated behaviors.
-- Delayed malware may trigger after the trace window.
-- Model performance depends on labeling quality and dataset diversity.
-
-**Future Work:**
-- Smarter UI automation (UIAutomator recorded flows).
-- Longer/adaptive tracing windows.
-- Richer network + file I/O features.
-- Explainable ML (feature-attribution per label) and stronger evaluation.
-
-## Contact / Reference
-IIT Madras, CSE
-(Insert your official email IDs here)
+## 9) Future work (practical next steps)
+- Better interaction automation (UIAutomator scripts / recorded flows).
+- Longer or adaptive tracing windows for suspicious apps.
+- Richer network evidence (optional PCAPDroid, DNS/HTTP metadata features).
+- Stronger model evaluation report (time-based split + ablations).
+- Explainability improvements (top features per label, evidence snippets).
