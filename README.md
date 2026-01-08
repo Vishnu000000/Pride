@@ -36,6 +36,14 @@ source venv/bin/activate
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
+What this “environment” is (important for viva):
+- The project runs inside **WSL (Linux)** on your Windows machine.
+- `venv` is a **Python virtual environment** that isolates Python packages for this project.
+  - This is where FastAPI, scikit-learn, perfetto trace processor Python bindings, pandas, etc. are installed.
+- `uvicorn` is the **ASGI server** that runs the FastAPI app (`api.main:app`).
+- Dynamic analysis uses **ADB** to communicate with the physical Android device.
+  - In this repo we call ADB via `./adb_wrapper.sh` (so WSL can call Windows `adb.exe` reliably).
+
 Expected in terminal:
 - `Found model at: model_out/model_labels.joblib`
 - `Uvicorn running on http://0.0.0.0:8000`
@@ -105,9 +113,19 @@ In terminal you see:
 
 ### Step C — static analysis
 Runs static feature extraction:
-- permissions and manifest indicators
-- size / component counts
-- other lightweight signals
+
+In our current implementation, the **exact static feature fields** produced by `extract_static_features(apk_path)` are:
+- `apk_size_mb`
+- `dex_count`
+  - number of `classes*.dex` files inside the APK (proxy for multi-dex / complexity)
+- `native_lib_count`
+  - number of `lib/*.so` native libraries (native code risk signal)
+- `perm_count`
+  - count of manifest permissions
+- `dangerous_perm_count`
+  - a heuristic count of permissions containing keywords like `READ`, `WRITE`, `SEND`, `RECEIVE`, `ACCESS`, `MODIFY`
+- `exported_components`
+  - a heuristic count based on components with intent-filters (approx proxy for exposure surface)
 
 This is fast (few seconds).
 
@@ -184,6 +202,36 @@ Why Perfetto:
 
 Trace duration:
 - configured around **~30 seconds** for demo practicality
+ - **Where to change it (exact):**
+   - API launches dynamic analysis from `api/main.py` with `--duration 30`.
+   - The dynamic runner is `tools/run_dynamic_analysis.py` and its `run_dynamic(..., duration: int = 30)` uses `duration_ms: {duration * 1000}` in the generated Perfetto config.
+   - So you can change the default in either place, but the API-side `--duration` value will override the script default.
+
+### What our Perfetto config collects (exact)
+In `tools/run_dynamic_analysis.py` we generate a minimal perfetto config with these data sources:
+- `linux.process_stats`
+  - collects process statistics by polling `/proc` periodically (`proc_stats_poll_ms: 1000`)
+- `android.surfaceflinger.frametimeline`
+  - collects frame timeline events (useful for UI/render related signals)
+
+This trace is then processed offline using `perfetto.trace_processor.TraceProcessor`.
+
+### What tables/CSVs we export from the trace
+`extract_csvs.py` attempts to export the following Perfetto SQL tables:
+- `android_binder_txns`
+- `slice`
+- `sched`
+- `process`
+- `thread`
+
+Each one becomes a CSV file under `csv_out/` named:
+- `csv_out/<package>.slice.csv`
+- `csv_out/<package>.sched.csv`
+- `csv_out/<package>.process.csv`
+- `csv_out/<package>.thread.csv`
+- `csv_out/<package>.android_binder_txns.csv` (only if present)
+
+Note: depending on device/trace contents, some tables may be missing/empty and are logged as `[SKIP]`.
 
 ---
 
@@ -208,6 +256,33 @@ After a successful dynamic run for package `com.facebook.orca`, you will see:
 If professor asks “how do you know dynamic really happened?”:
 - point to `features/<package>.features.csv`
 - point to uvicorn logs showing install/launch/trace/pull/feature extraction
+
+### What dynamic features are inside `features/<package>.features.csv` (exact columns)
+These features are computed by `feature_extractor.py` from the exported trace CSVs:
+
+Basic counts:
+- `slice_count`
+- `sched_event_count`
+- `process_count`
+- `thread_count`
+
+Slice duration statistics (derived from `slice.dur`):
+- `slice_avg_dur_ms`
+- `slice_std_dur_ms`
+- `slice_max_dur_ms`
+- `slice_p90_dur_ms`
+- `slice_cv_dur` (coefficient of variation)
+- `slice_max_to_mean`
+
+Normalized ratios:
+- `slice_per_thread`
+- `sched_per_thread`
+- `slice_per_process`
+- `threads_per_process`
+
+Binary/threshold indicators:
+- `high_background_activity` (1 if `sched_per_thread > 100`)
+- `high_thread_pressure` (1 if `threads_per_process > 50`)
 
 ---
 
@@ -234,6 +309,10 @@ The trained file `model_out/model_labels.joblib` is a **model bundle** (saved us
 - the **ordered feature schema** (`feature_columns`)
 - the list of labels
 - a version id (timestamp)
+
+What the “ML model name” is in plain words:
+- **Per-label Calibrated Linear SVM bundle** (stored in `model_labels.joblib`).
+- Internally: 14 binary estimators (one per label).
 
 The predictor is **per-label binary classification**:
 - We train **one binary classifier per label** (14 classifiers).
@@ -284,6 +363,17 @@ Retraining combines:
 - a baseline dataset (`training_set` / curated examples)
 - new labeled uploads recorded in `uploads.db`
 
+#### After each retrain, does `model_out/model_labels.joblib` “add values”?
+Not incrementally. Each retrain:
+- re-reads the dataset,
+- re-fits the estimators,
+- and **overwrites** `model_out/model_labels.joblib` with a new bundle.
+
+What changes after retrain:
+- the estimator weights/parameters (because training data changed)
+- `version` (timestamp)
+- potentially `feature_columns` if your dataset schema changed (not recommended to change frequently)
+
 ### 9.6 What happens when data is insufficient (robust fallbacks)
 Some labels can be rare early on. The training script handles this safely:
 
@@ -331,6 +421,42 @@ After analysis completes, the UI displays:
 If professor asks “how do you know ML was used?”
 - show `ML Model: Active`
 - show `ML Used: Yes`
+
+---
+
+## 10.1 What exactly is `uploads.db`?
+`uploads.db` is a SQLite database used for bookkeeping and retraining UX.
+
+It contains 3 main tables (see `api/storage.py`):
+
+### `uploads`
+- `id` (auto increment)
+- `filename`
+- `package`
+- `uploaded_at`
+- `consent` (whether dynamic analysis was allowed)
+- `used_for_training` (0/1)
+- `analysis_json` (cached JSON output for that upload)
+
+### `upload_labels`
+- stores per-upload label annotations:
+  - `upload_id`, `label`, `value`, `provided_at`, `provided_by`
+
+### `retrain_log`
+- stores retrain history:
+  - start/end timestamps
+  - how many new uploads were used
+  - success/failure
+  - captured stdout/stderr from training
+
+This DB is what powers the UI line like:
+`Uploads: total X, trained Y, untrained Z. Last retrain: ...`
+
+---
+
+## 14) Network capture / PCAPDroid status
+PCAPDroid is currently **not integrated in code** (no PCAPDroid/pcap pipeline is executed).
+It is mentioned only as an **optional future extension**.
 
 ---
 
